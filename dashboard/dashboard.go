@@ -85,11 +85,22 @@ func New(db dbconn.RoConn) (Dashboard, error) {
 		}
 	}()
 
-	topDomainsByStatus, err := db.Prepare(`
+	byStatusWithStmtPart := `
+with
+	resolve_domain_mapping(d, status, read_ts_sec, process_ip, relay_ip, relay_name)
+as (
 	select
-		lm_resolve_domain_mapping(recipient_domain_part) as d, count(lm_resolve_domain_mapping(recipient_domain_part)) as c
+		lm_resolve_domain_mapping(recipient_domain_part) as domain, status, read_ts_sec, process_ip, relay_ip, relay_name
 	from
 		postfix_smtp_message_status
+	)
+`
+
+	topDomainsByStatus, err := db.Prepare(byStatusWithStmtPart + `
+	select
+		d, count(d) as c
+	from
+		resolve_domain_mapping
 	where
 		status = ? and read_ts_sec between ? and ?
 	group by
@@ -108,11 +119,11 @@ func New(db dbconn.RoConn) (Dashboard, error) {
 		}
 	}()
 
-	topBusiestDomains, err := db.Prepare(`
+	topBusiestDomains, err := db.Prepare(byStatusWithStmtPart + `
 	select
-		lm_resolve_domain_mapping(recipient_domain_part) as d, count(lm_resolve_domain_mapping(recipient_domain_part)) as c
+		d, count(d) as c
 	from
-		postfix_smtp_message_status
+		resolve_domain_mapping
 	where
 		read_ts_sec between ? and ? and ` + removeSentToLocalhostSqlFragment + `
 	group by
