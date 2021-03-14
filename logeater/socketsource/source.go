@@ -10,20 +10,27 @@ import (
 	"gitlab.com/lightmeter/controlcenter/logeater/transform"
 	"gitlab.com/lightmeter/controlcenter/pkg/postfix"
 	"gitlab.com/lightmeter/controlcenter/util/errorutil"
+	"gitlab.com/lightmeter/controlcenter/util/timeutil"
 	"net"
 	"os"
 	"strings"
+	"time"
 )
 
 type Source struct {
 	announcer announcer.ImportAnnouncer
 	listener  net.Listener
 	builder   transform.Builder
+	clock     timeutil.Clock
 	closed    bool
 	closeErr  error
 }
 
 func New(socketDesc string, builder transform.Builder, announcer announcer.ImportAnnouncer) (*Source, error) {
+	return newWithClock(socketDesc, builder, announcer, &timeutil.RealClock{})
+}
+
+func newWithClock(socketDesc string, builder transform.Builder, announcer announcer.ImportAnnouncer, clock timeutil.Clock) (*Source, error) {
 	c := strings.Split(socketDesc, "=")
 
 	if len(c) != 2 {
@@ -48,6 +55,7 @@ func New(socketDesc string, builder transform.Builder, announcer announcer.Impor
 		listener:  l,
 		builder:   builder,
 		announcer: announcer,
+		clock:     clock,
 	}, nil
 }
 
@@ -67,8 +75,19 @@ func (s *Source) Close() error {
 	return nil
 }
 
+type emptyAnnouncer struct{}
+
+func (*emptyAnnouncer) AnnounceStart(time.Time) {
+	// it's empty...
+}
+
+func (*emptyAnnouncer) AnnounceProgress(announcer.Progress) {
+	// it's empty...
+}
+
 func (s *Source) PublishLogs(p postfix.Publisher) error {
-	announcer.Skip(s.announcer)
+	// only the first execution can potentially to notify import progress
+	firstExecution := true
 
 	for {
 		conn, err := s.listener.Accept()
@@ -76,8 +95,19 @@ func (s *Source) PublishLogs(p postfix.Publisher) error {
 			return errorutil.Wrap(err)
 		}
 
+		announcer := func() announcer.ImportAnnouncer {
+			if firstExecution {
+				firstExecution = true
+				return s.announcer
+			}
+
+			// as if we have already finished the import, we cannot do it again
+			return &emptyAnnouncer{}
+		}()
+
 		go func() {
-			errorutil.MustSucceed(transform.ReadFromReader(conn, p, s.builder))
+			// FIXME: Handling multiple connections that feed times in similar intervals would mess up with the import/progress logic...
+			errorutil.MustSucceed(transform.ReadFromReader(conn, p, s.builder, announcer, s.clock))
 		}()
 	}
 }
